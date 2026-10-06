@@ -1,6 +1,7 @@
 import { reactive, readonly } from 'vue'
 import { normalizeNoteEditorMode } from '../utils/noteEditorMode'
 import { compareByOrder, groupOf } from '../utils/todoSchedule'
+import { isHttpWebTarget } from '../utils/web'
 import {
   tauriApi,
   isTauri,
@@ -10,9 +11,12 @@ import {
   type DetachedSticky,
   type GeoLocation,
   type Note,
+  type NoteFolder,
+  type NoteTagRow,
   type Quote,
   type Resource,
   type ResourceSubcategory,
+  type ResourceZone,
   type SudaCustomModuleConfig,
   type Snippet,
   type Sticky,
@@ -39,18 +43,24 @@ const DEFAULT_CHAT_SHORTCUT = IS_MAC_PREVIEW ? 'CommandOrControl+Shift+K' : 'Ctr
 interface StoreState {
   resources: Resource[]
   notes: Note[]
+  /** 笔记文件夹树（速记改造；树由前端按 parent_id 组装） */
+  noteFolders: NoteFolder[]
   todos: Todo[]
   stickies: Sticky[]
   detached: DetachedSticky[]
   countdowns: Countdown[]
   snippets: Snippet[]
   tags: Tag[]
+  /** 笔记-标签关联（响应式：NoteFolderTree 标签筛选随它重算，修「新建标签后筛选不刷新」缺陷④） */
+  noteTagRows: NoteTagRow[]
   /** 待办标签定义（与笔记标签 tags 是两套独立定义） */
   todoTags: TodoTag[]
   /** 待办-标签关联（前端构建筛选映射用） */
   todoTagLinks: TodoTagLink[]
   /** 速达小类定义（ADR 0012：各大类一套、单归属；category 为 null = 未归类） */
   resourceSubcategories: ResourceSubcategory[]
+  /** 速达分区（「全部」tab 自定义成组陈列，跨大类；zone_id 为 null = 未分区） */
+  zones: ResourceZone[]
   config: AppConfig
   systemInfo: SystemInfo | null
   online: boolean
@@ -62,15 +72,18 @@ interface StoreState {
 const state = reactive<StoreState>({
   resources: [],
   notes: [],
+  noteFolders: [],
   todos: [],
   stickies: [],
   detached: [],
   countdowns: [],
   snippets: [],
   tags: [],
+  noteTagRows: [],
   todoTags: [],
   todoTagLinks: [],
   resourceSubcategories: [],
+  zones: [],
   config: {
     theme_mode: 'light',
     theme_preset: 'indigo',
@@ -91,6 +104,7 @@ const state = reactive<StoreState>({
     global_shortcut: DEFAULT_GLOBAL_SHORTCUT,
     dashboard_mid_content: 'countdown',
     dashboard_layout: '',
+    dashboard_default_layout: '',
     countdown_sound: false,
     clock_quote: '',
     notice_duration_ms: 5000,
@@ -115,6 +129,13 @@ const state = reactive<StoreState>({
     clipboard_shortcut: IS_MAC_PREVIEW ? 'CommandOrControl+Alt+V' : 'Ctrl+`',
     search_shortcut: DEFAULT_SEARCH_SHORTCUT,
     chat_shortcut: DEFAULT_CHAT_SHORTCUT,
+    notes_shortcut: IS_MAC_PREVIEW ? 'CommandOrControl+Shift+N' : 'Ctrl+Shift+N',
+    global_shortcut_enabled: true,
+    clipboard_shortcut_enabled: true,
+    search_shortcut_enabled: true,
+    chat_shortcut_enabled: true,
+    notes_shortcut_enabled: true,
+    note_trash_retention_days: 0,
     clipboard_max_items: 500,
     clipboard_ttl_days: 7,
     clipboard_paused: false,
@@ -135,6 +156,7 @@ const state = reactive<StoreState>({
     sidebar_extensions: [],
     extension_open_modes: {},
     extension_link_modes: {},
+    extension_row_click: 'detail',
     run_at_startup: false,
     auto_update_enabled: true,
     update_interval_hours: 4,
@@ -172,6 +194,7 @@ export function useStore() {
     ])
     state.resources = data.resources
     state.notes = data.notes
+    state.noteFolders = data.note_folders
     state.todos = data.todos
     state.stickies = data.stickies
     state.detached = data.detached
@@ -182,8 +205,12 @@ export function useStore() {
     state.loaded = true
     // 待办标签与关联单独拉（不进 get_initial_data：老库/老版本兼容面更小）
     void refreshTodoTags()
+    // 笔记-标签关联单独拉（NoteFolderTree 标签筛选的数据源，响应式）
+    void refreshNoteTagRows()
     // 速达小类单独拉（同上）
     void refreshSubcategories()
+    // 速达分区单独拉（同上）
+    void refreshZones()
   }
 
   // ---- 提示词百宝箱 ----
@@ -295,6 +322,10 @@ export function useStore() {
     category?: string | null
     icon?: string | null
     args?: string | null
+    zoneId?: number | null
+    description?: string | null
+    remark?: string | null
+    remarkLabel?: string | null
   }) {
     const r = await tauriApi.createResource(payload)
     state.resources.push(r)
@@ -309,6 +340,10 @@ export function useStore() {
     category?: string | null
     icon?: string | null
     args?: string | null
+    zoneId?: number | null
+    description?: string | null
+    remark?: string | null
+    remarkLabel?: string | null
   }) {
     const r = await tauriApi.updateResource(payload)
     const idx = state.resources.findIndex((x) => x.id === r.id)
@@ -336,23 +371,29 @@ export function useStore() {
    * - panel → 派发 CustomEvent 交 index.vue 切到内嵌面板视图（store 不持有视图状态；
    *   最近使用由 suda_panel_show 在后端写）
    * - window → 独立应用内浏览器窗口池（后端 suda_browser_open 写最近使用）
+   * - system → 系统默认浏览器（走 launch_resource 的后端 open_url）
    * 应用/文件维持系统路径 launch_resource。
    */
   async function launchResource(id: number) {
     const r = state.resources.find((x) => x.id === id)
-    if (r && r.kind === 'web' && isTauri()) {
+    // smb/ftp 等远程协议只有系统能打开（webview 内嵌面板/应用内浏览器都导航不了），
+    // 走后端 launch_resource 的 open_url（smb 自动转 UNC 交资源管理器）
+    if (r && r.kind === 'web' && isTauri() && isHttpWebTarget(r.target)) {
       if (state.config.suda_web_open_mode === 'window') {
         await tauriApi.sudaBrowserOpen(id)
         r.last_launched_at = new Date().toISOString()
         return
       }
-      window.dispatchEvent(
-        new CustomEvent('suda-open-web-panel', { detail: { id, url: r.target, name: r.name } }),
-      )
-      // 与 window 分支同口径：后端 suda_panel_show 落库，这里同步本地时间戳，
-      // 否则「常用」/最近使用要等下次刷新才重排
-      r.last_launched_at = new Date().toISOString()
-      return
+      if (state.config.suda_web_open_mode !== 'system') {
+        window.dispatchEvent(
+          new CustomEvent('suda-open-web-panel', { detail: { id, url: r.target, name: r.name } }),
+        )
+        // 与 window 分支同口径：后端 suda_panel_show 落库，这里同步本地时间戳，
+        // 否则「常用」/最近使用要等下次刷新才重排
+        r.last_launched_at = new Date().toISOString()
+        return
+      }
+      // system → 落到下方 launchResource：后端 open_url 交系统默认浏览器并写最近使用
     }
     await tauriApi.launchResource(id)
     if (r) r.last_launched_at = new Date().toISOString()
@@ -439,8 +480,83 @@ export function useStore() {
     }
   }
 
-  /** 网页默认打开方式（ADR 0011：panel=内嵌面板 / window=独立窗口） */
-  async function setSudaWebOpenMode(mode: 'panel' | 'window') {
+  // ---- 速达分区（「全部」tab 自定义成组陈列，独立于小类）----
+  async function refreshZones() {
+    if (!isTauri()) return
+    state.zones = await tauriApi.listZones()
+  }
+
+  /** 新建分区：后端落尾部（sort_order=max+1） */
+  async function addZone(name: string) {
+    const z = await tauriApi.createZone(name)
+    state.zones.push(z)
+    return z
+  }
+
+  /** 改名：资源按 id 关联，本地无需级联 */
+  async function editZone(id: number, name: string) {
+    await tauriApi.renameZone(id, name)
+    const z = state.zones.find((x) => x.id === id)
+    if (z) z.name = name
+  }
+
+  /** 删除分区：后端单事务把成员 zone_id 置 NULL，本地同口径推演；返回被移出的成员 id 快照 */
+  async function removeZone(id: number) {
+    const memberIds = state.resources.filter((r) => r.zone_id === id).map((r) => r.id)
+    await tauriApi.deleteZone(id)
+    state.zones = state.zones.filter((z) => z.id !== id)
+    for (const r of state.resources) {
+      if (r.zone_id === id) r.zone_id = null
+    }
+    return memberIds
+  }
+
+  async function reorderZones(ids: number[]) {
+    const rank = new Map(ids.map((id, i) => [id, i]))
+    state.zones = state.zones
+      .map((z) => ({ ...z, sort_order: rank.get(z.id) ?? z.sort_order }))
+      .sort((a, b) => a.sort_order - b.sort_order)
+    if (isTauri()) await tauriApi.reorderZones(ids)
+  }
+
+  /** 调整分区框尺寸（卡片格数；乐观更新 + 持久化） */
+  async function resizeZone(id: number, cols: number, rows: number) {
+    const z = state.zones.find((x) => x.id === id)
+    if (!z || (z.cols === cols && z.rows === rows)) return
+    z.cols = cols
+    z.rows = rows
+    if (isTauri()) await tauriApi.resizeZone(id, cols, rows)
+  }
+
+  /** 批量改分区归属（右键移动/删分区撤销），不动 sort_order */
+  async function setResourcesZone(ids: number[], zoneId: number | null) {
+    if (isTauri()) await tauriApi.setResourcesZone(ids, zoneId)
+    const set = new Set(ids)
+    for (const r of state.resources) {
+      if (set.has(r.id)) r.zone_id = zoneId
+    }
+  }
+
+  /**
+   * 分区模式拖拽的原子写回：entries 顺序即全表新 sort_order（ids[i] → i），
+   * 每项携带目标分区。本地乐观更新与后端同口径：sort_order 与 zone_id 一次到位。
+   */
+  async function reorderResourcesZoned(entries: { id: number; zoneId: number | null }[]) {
+    const zoneOf = new Map(entries.map((e) => [e.id, e.zoneId]))
+    const rank = new Map(entries.map((e, i) => [e.id, i]))
+    state.resources = state.resources
+      .map((r) => ({
+        ...r,
+        zone_id: zoneOf.has(r.id) ? (zoneOf.get(r.id) as number | null) : r.zone_id,
+        sort_order: rank.get(r.id) ?? Number.MAX_SAFE_INTEGER,
+      }))
+      .sort((a, b) => a.sort_order - b.sort_order)
+      .map((r, i) => ({ ...r, sort_order: i }))
+    if (isTauri()) await tauriApi.reorderResourcesZoned(entries)
+  }
+
+  /** 网页默认打开方式（ADR 0011：panel=内嵌面板 / window=独立窗口 / system=系统默认浏览器） */
+  async function setSudaWebOpenMode(mode: 'panel' | 'window' | 'system') {
     state.config.suda_web_open_mode = mode
     if (!isTauri()) return
     // 专属命令自带校验 + 配置锁落盘，不必再 saveConfig 整体写一遍（双写已去）
@@ -485,11 +601,17 @@ export function useStore() {
     await tauriApi.saveConfig(state.config)
   }
 
-  // ---- 笔记 ----
-  async function addNote(title: string) {
+  // ---- 笔记（速记改造：文件夹树 / 回收站 / 响应式标签映射） ----
+  function localNote(id: number, title: string, content: string, folderId: number | null): Note {
+    const now = new Date().toISOString()
+    return { id, title, content, folder_id: folderId, source_url: '', deleted_at: null, icon: null, created_at: now, updated_at: now }
+  }
+
+  /** 新建笔记：folderId = 当前选中文件夹（null = 树根落根），初始正文同事务写入（修缺陷②） */
+  async function addNote(title: string, folderId: number | null = null, content = '') {
     const n = isTauri()
-      ? await tauriApi.createNote(title)
-      : { id: Date.now(), title, content: '', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+      ? await tauriApi.createNoteIn(title, content, folderId, '')
+      : localNote(Date.now(), title, content, folderId)
     state.notes.unshift(n)
     return n
   }
@@ -497,21 +619,142 @@ export function useStore() {
   async function saveNote(id: number, title: string, content: string) {
     const n = isTauri()
       ? await tauriApi.updateNote(id, title, content)
-      : { id, title, content, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+      : localNote(id, title, content, state.notes.find((x) => x.id === id)?.folder_id ?? null)
     const idx = state.notes.findIndex((x) => x.id === id)
     if (idx >= 0) state.notes[idx] = n
     return n
   }
 
+  /** 移入回收站（软删）。从活列表移除；刷新标签关联（被删笔记的关联行仍在映射里也无妨，筛选按活笔记取交集） */
+  async function trashNote(id: number) {
+    if (isTauri()) await tauriApi.trashNote(id)
+    state.notes = state.notes.filter((x) => x.id !== id)
+  }
+
+  /** 回收站还原 */
+  async function restoreNote(id: number) {
+    if (!isTauri()) return
+    await tauriApi.restoreNote(id)
+    // 先把这条的全量（含正文）放进活列表再走 refreshNotes 合并：list_notes 只有元信息，
+    // 直接整表刷新会让还原的笔记以空正文进 store——切到它时空正文回写库 = 丢稿
+    const full = await tauriApi.getNote(id).catch(() => null)
+    if (full) state.notes = [full, ...state.notes.filter((x) => x.id !== id)]
+    await refreshNotes()
+  }
+
+  /** 永久删除（回收站内；也用于「新建后未输入即切走」的空笔记自清理） */
+  async function purgeNote(id: number) {
+    if (isTauri()) await tauriApi.purgeNote(id)
+    state.notes = state.notes.filter((x) => x.id !== id)
+  }
+
+  async function loadTrashedNotes() {
+    if (!isTauri()) return [] as Note[]
+    return tauriApi.listTrashedNotes()
+  }
+
+  /** 旧删除入口（硬删语义）：保留给既有调用方，UI 删除一律走 trashNote */
   async function removeNote(id: number) {
     if (isTauri()) await tauriApi.deleteNote(id)
     state.notes = state.notes.filter((x) => x.id !== id)
   }
 
-  /** 剪贴板浮层等外部保存速记后，主窗口刷新笔记列表（仅拉元信息，轻量） */
+  /** 剪贴板浮层等外部保存速记后，主窗口刷新笔记列表（仅拉元信息，轻量）。
+   *  标签关联一并刷新：外部进程改标签时筛选映射也要跟上。
+   *  ⚠️ list_notes 不含正文：必须按 id 合并保留本地已知 content（外部新建的
+   *  条目单条补拉全量）。整表替换会把所有笔记正文清空，编辑器下次切笔记
+   *  把空正文写回库 = 永久丢稿 */
   async function refreshNotes() {
     if (!isTauri()) return
-    state.notes = await tauriApi.listNotes()
+    const meta = await tauriApi.listNotes()
+    const byId = new Map(state.notes.map((n) => [n.id, n]))
+    state.notes = await Promise.all(
+      meta.map(async (m) => {
+        const old = byId.get(m.id)
+        if (old) return { ...m, content: old.content }
+        const full = await tauriApi.getNote(m.id).catch(() => null)
+        return full ?? m
+      }),
+    )
+    void refreshNoteTagRows()
+  }
+
+  /** 笔记-标签关联（NoteFolderTree 标签筛选数据源；响应式存 state，修缺陷④） */
+  async function refreshNoteTagRows() {
+    if (!isTauri()) return
+    state.noteTagRows = await tauriApi.listNoteTags()
+  }
+
+  // ---- 笔记文件夹 ----
+  async function createNoteFolder(name: string, parentId: number | null) {
+    const f = isTauri()
+      ? await tauriApi.createNoteFolder(name, parentId)
+      : { id: Date.now(), name, parent_id: parentId, sort_order: 0, builtin: false, created_at: new Date().toISOString() }
+    state.noteFolders.push(f)
+    return f
+  }
+
+  async function renameNoteFolder(id: number, name: string) {
+    if (isTauri()) await tauriApi.renameNoteFolder(id, name)
+    const f = state.noteFolders.find((x) => x.id === id)
+    if (f) f.name = name
+  }
+
+  /** 删除文件夹：后端把子文件夹与笔记上移一级；前端重拉文件夹与笔记对齐 */
+  async function deleteNoteFolder(id: number) {
+    if (isTauri()) await tauriApi.deleteNoteFolder(id)
+    await Promise.all([refreshNoteFolders(), refreshNotes()])
+  }
+
+  async function refreshNoteFolders() {
+    if (!isTauri()) return
+    state.noteFolders = await tauriApi.listNoteFolders()
+  }
+
+  /** 文件夹拖拽落点原子写回（后端做环检测）；本地同步位置便于即时反馈 */
+  async function reorderNoteFolders(moves: { id: number; parent_id: number | null; sort_order: number }[]) {
+    if (isTauri()) await tauriApi.reorderNoteFolders(moves)
+    for (const m of moves) {
+      const f = state.noteFolders.find((x) => x.id === m.id)
+      if (f) {
+        f.parent_id = m.parent_id
+        f.sort_order = m.sort_order
+      }
+    }
+  }
+
+  /** 移动单条笔记到文件夹（folderId = null 回树根） */
+  async function setNoteFolder(noteId: number, folderId: number | null) {
+    if (isTauri()) await tauriApi.setNoteFolder(noteId, folderId)
+    const n = state.notes.find((x) => x.id === noteId)
+    if (n) n.folder_id = folderId
+  }
+
+  /** 设置/清除笔记自定义树图标（emoji；icon = null 恢复默认） */
+  async function setNoteIcon(id: number, icon: string | null) {
+    if (isTauri()) await tauriApi.setNoteIcon(id, icon)
+    const n = state.notes.find((x) => x.id === id)
+    if (n) n.icon = icon
+  }
+
+  /** 一键清空回收站（调用方先确认），返回清除条数 */
+  async function purgeAllTrashedNotes() {
+    if (!isTauri()) return 0
+    return tauriApi.purgeAllTrashedNotes()
+  }
+
+  /** 笔记标签改名/删除后同步本地定义（归属不动） */
+  async function renameTag(id: number, name: string) {
+    if (isTauri()) await tauriApi.renameTag(id, name)
+    const t = state.tags.find((x) => x.id === id)
+    if (t) t.name = name
+  }
+
+  async function deleteTag(id: number) {
+    if (isTauri()) await tauriApi.deleteTag(id)
+    state.tags = state.tags.filter((x) => x.id !== id)
+    // 关联行清理交给 refreshNoteTagRows（删除只解关联）
+    void refreshNoteTagRows()
   }
 
   async function searchAll(keyword: string) {
@@ -1032,21 +1275,14 @@ export function useStore() {
   async function createTag(name: string) {
     const t = isTauri()
       ? await tauriApi.createTag(name)
-      : { id: Date.now(), name, created_at: new Date().toISOString() }
+      : { id: Date.now(), name, created_at: new Date().toISOString(), builtin: false }
     if (!state.tags.some((x) => x.id === t.id)) state.tags.push(t)
     return t
   }
 
-  async function deleteTag(id: number) {
-    if (isTauri()) await tauriApi.deleteTag(id)
-    state.tags = state.tags.filter((x) => x.id !== id)
-  }
-
-  // ---- 笔记-标签关联（列表筛选用） ----
-  async function loadNoteTagsMap() {
-    if (!isTauri()) return []
-    return tauriApi.listNoteTags()
-  }
+  // ---- 笔记-标签关联 ----
+  // 关联行已改为响应式存 state.noteTagRows（refreshNoteTagRows），NoteFolderTree 的标签筛选
+  // 随之重算——修缺陷④「新建标签后筛选不刷新」（旧 onMounted 一次性建映射已删）
 
   // ---- 配置 ----
   async function setThemeMode(mode: 'light' | 'dark' | 'system') {
@@ -1128,6 +1364,39 @@ export function useStore() {
     return saved
   }
 
+  async function setNotesShortcut(value: string) {
+    state.config.notes_shortcut = value
+    if (!isTauri()) return value
+    const saved = await tauriApi.setNotesShortcut(value)
+    state.config.notes_shortcut = saved
+    return saved
+  }
+
+  /** 启用/禁用某个全局快捷键：禁用 = 后端注销热键但保留键值（重开即恢复），失败回滚内存状态 */
+  async function setShortcutEnabled(
+    kind: 'main' | 'clipboard' | 'search' | 'chat' | 'notes',
+    enabled: boolean,
+  ) {
+    const key = (
+      {
+        main: 'global_shortcut_enabled',
+        clipboard: 'clipboard_shortcut_enabled',
+        search: 'search_shortcut_enabled',
+        chat: 'chat_shortcut_enabled',
+        notes: 'notes_shortcut_enabled',
+      } as const
+    )[kind]
+    const prev = state.config[key]
+    state.config[key] = enabled
+    if (!isTauri()) return
+    try {
+      await tauriApi.setShortcutEnabled(kind, enabled)
+    } catch (e) {
+      state.config[key] = prev
+      throw e
+    }
+  }
+
   /** 主页面「中上区块」显示内容：token/notes/todo/resources/countdown */
   async function setDashboardMidContent(value: string) {
     state.config.dashboard_mid_content = value
@@ -1138,6 +1407,13 @@ export function useStore() {
   /** 工作台自定义布局（placements JSON 数组字符串，经 config.json 落盘） */
   async function setDashboardLayout(value: string) {
     state.config.dashboard_layout = value
+    if (!isTauri()) return
+    await tauriApi.saveConfig(state.config)
+  }
+
+  /** 用户保存的默认布局快照（「存为默认布局」写入，「恢复默认布局」读取） */
+  async function setDashboardDefaultLayout(value: string) {
+    state.config.dashboard_default_layout = value
     if (!isTauri()) return
     await tauriApi.saveConfig(state.config)
   }
@@ -1242,6 +1518,14 @@ export function useStore() {
     await tauriApi.saveConfig(state.config)
   }
 
+  /** 速记回收站保留天数（0 = 永久保留）。落盘后触发一次清理（命令读同一配置） */
+  async function setNoteTrashRetention(days: number) {
+    state.config.note_trash_retention_days = days
+    if (!isTauri()) return
+    await tauriApi.saveConfig(state.config)
+    return tauriApi.purgeExpiredNotes()
+  }
+
   /** service 扩展运行时策略：auto（自动检测）/ builtin（始终内置）/ system（始终系统） */
   async function setRuntimeStrategy(value: 'auto' | 'builtin' | 'system') {
     state.config.runtime_strategy = value
@@ -1289,6 +1573,13 @@ export function useStore() {
     state.config.extension_link_modes = { ...modes, [id]: mode }
     if (!isTauri()) return
     void tauriApi.saveConfig(state.config)
+  }
+
+  /** 扩展中心列表点击行为：detail（默认，点行看详情）/ open（点行直接打开、右侧 ⋯ 看详情） */
+  async function setExtensionRowClick(value: 'detail' | 'open') {
+    state.config.extension_row_click = value
+    if (!isTauri()) return
+    await tauriApi.saveConfig(state.config)
   }
 
   // ---- 开机自启动 ----
@@ -1576,6 +1867,14 @@ export function useStore() {
     removeSubcategory,
     reorderSubcategories,
     setDefaultSubcategory,
+    refreshZones,
+    addZone,
+    editZone,
+    removeZone,
+    reorderZones,
+    resizeZone,
+    setResourcesZone,
+    reorderResourcesZoned,
     setSudaWebOpenMode,
     openResourceInWindow,
     openWebPanel,
@@ -1585,7 +1884,22 @@ export function useStore() {
     addNote,
     saveNote,
     removeNote,
+    trashNote,
+    restoreNote,
+    purgeNote,
+    loadTrashedNotes,
     refreshNotes,
+    refreshNoteTagRows,
+    createNoteFolder,
+    renameNoteFolder,
+    deleteNoteFolder,
+    refreshNoteFolders,
+    reorderNoteFolders,
+    setNoteFolder,
+    setNoteIcon,
+    purgeAllTrashedNotes,
+    renameTag,
+    deleteTag,
     searchAll,
     createTodo,
     toggleTodo,
@@ -1623,8 +1937,6 @@ export function useStore() {
     unfloatCountdown,
     refreshCountdowns,
     createTag,
-    deleteTag,
-    loadNoteTagsMap,
     setThemeMode,
     setThemePreset,
     setAccentColor,
@@ -1638,8 +1950,11 @@ export function useStore() {
     setGlobalShortcut,
     setSearchShortcut,
     setChatShortcut,
+    setNotesShortcut,
+    setShortcutEnabled,
     setDashboardMidContent,
     setDashboardLayout,
+    setDashboardDefaultLayout,
     setCountdownSound,
     setNoticeDuration,
     setClockQuote,
@@ -1651,12 +1966,14 @@ export function useStore() {
     setFontScale,
     setModuleFontScale,
     setNoteEditorMode,
+    setNoteTrashRetention,
     setRuntimeStrategy,
     setServiceAutoTrust,
     setSidebarExtension,
     setSidebarExtensionBulk,
     setExtensionOpenMode,
     setExtensionLinkMode,
+    setExtensionRowClick,
     setRunAtStartup,
     setFloatingBallEnabled,
     setFloatingBallAutoHide,

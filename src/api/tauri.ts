@@ -12,6 +12,14 @@ export interface Resource {
   last_launched_at: string | null
   created_at: string
   updated_at: string
+  /** 所属速达分区 id（「全部」tab 自定义分组，跨大类）；null = 未分区。与小类 category 正交 */
+  zone_id: number | null
+  /** 用途说明（非敏感：这个网页/程序/文件是什么） */
+  description: string | null
+  /** 备注（敏感：可存账号密码/解压密码等，后端 DPAPI 加密落盘；展示侧一律密文 + 小眼睛） */
+  remark: string | null
+  /** 备注自定义标签（如「账号密码」「解压密码」）；null = 默认「备注」 */
+  remark_label: string | null
 }
 
 /** 工作台「自定义速达」槽位内容配置（槽位 id 固定 suda1..suda4，同便签 1/2 池子模式） */
@@ -42,6 +50,16 @@ export interface ResourceSubcategory {
   is_default: boolean
 }
 
+/** 速达分区：「全部」tab 的自定义成组陈列（跨大类、无层级）；一个都没有时「全部」保持平铺。
+ *  cols/rows = 分区框尺寸（卡片格数，新建默认 3×2，下限语义：内容超出按行自动膨胀） */
+export interface ResourceZone {
+  id: number
+  name: string
+  sort_order: number
+  cols: number
+  rows: number
+}
+
 /** 速达独立应用内浏览器窗口槽位快照（chrome 页挂载时拉取） */
 export interface SudaSlotState {
   slot: number
@@ -70,6 +88,14 @@ export interface Note {
   content: string
   created_at: string
   updated_at: string
+  /** 所在文件夹（null = 树根） */
+  folder_id: number | null
+  /** 剪藏来源 URL（普通笔记为空串） */
+  source_url: string
+  /** 回收站标记（null = 正常；有值 = 已移入回收站） */
+  deleted_at: string | null
+  /** 自定义树图标（emoji，null = 默认文件图标） */
+  icon: string | null
 }
 
 export interface Todo {
@@ -255,6 +281,8 @@ export interface AppConfig {
   dashboard_mid_content: string
   /** 工作台自定义布局（placements JSON 数组字符串；空串 = 未自定义，回退推荐布局） */
   dashboard_layout: string
+  /** 用户保存的默认布局快照（placements JSON 数组字符串；空串 = 未保存过，恢复默认不可用） */
+  dashboard_default_layout: string
   countdown_sound: boolean
   clock_quote: string // 时钟卡片语录（可配置，空串回退默认）
   notice_duration_ms: number // 右下角通知弹窗驻留时长（毫秒，1000–60000）
@@ -289,6 +317,14 @@ export interface AppConfig {
   search_shortcut: string
   /** AI 对话呼出快捷键（默认 Ctrl+Shift+K） */
   chat_shortcut: string
+  /** 速记呼出快捷键（默认 Ctrl+Shift+N）：唤起主窗→切速记视图→聚焦新建 */
+  notes_shortcut: string
+  /** 各全局快捷键是否启用（默认开）：关掉 = 注销热键但保留键值，重开即恢复 */
+  global_shortcut_enabled: boolean
+  clipboard_shortcut_enabled: boolean
+  search_shortcut_enabled: boolean
+  chat_shortcut_enabled: boolean
+  notes_shortcut_enabled: boolean
   /** 剪贴板历史最大条数（含置顶） */
   clipboard_max_items: number
   /** 非置顶记录保留天数 */
@@ -297,7 +333,7 @@ export interface AppConfig {
   clipboard_paused: boolean
   /** 粘贴快捷键方式：auto / ctrl_v / ctrl_shift_v / shift_insert */
   clipboard_paste_method: string
-  /** 速达网页默认打开方式：panel(内嵌面板) / window(独立应用内浏览器窗口) */
+  /** 速达网页默认打开方式：panel(内嵌面板) / window(独立应用内浏览器窗口) / system(系统默认浏览器) */
   suda_web_open_mode: string
   /** 工作台「自定义速达」槽位内容配置（suda1..suda4） */
   suda_custom_modules: SudaCustomModuleConfig[]
@@ -319,6 +355,8 @@ export interface AppConfig {
   font_todo: number
   /** 速记编辑器模式：wysiwyg（实时预览）/ split（分屏预览）/ source（源码） */
   note_editor_mode: string
+  /** 速记回收站保留天数（0 = 永久保留，默认）。启动时与设置变更时按此清理 */
+  note_trash_retention_days: number
   /** service 扩展运行时策略：auto / builtin / system */
   runtime_strategy: string
   /** 全局自动信任 service 扩展（默认关）：开启后新装/更新的 service 扩展无需逐个「去授权」 */
@@ -329,6 +367,8 @@ export interface AppConfig {
   extension_open_modes: Record<string, string>
   /** 扩展「链接打开方式」映射：extId → inapp（应用内浏览器，默认）/ browser（系统浏览器） */
   extension_link_modes: Record<string, string>
+  /** 扩展中心列表点击行为：detail（默认，点行看详情）/ open（点行直接打开） */
+  extension_row_click: 'detail' | 'open'
   /** 开机自启动（登录 Windows 时自动驻留托盘） */
   run_at_startup: boolean
   /** 自动升级总开关（默认开启） */
@@ -416,6 +456,8 @@ export interface ExtensionEntry {
   open_in: string[]
   permissions: string[]
   description: string
+  /** 作者署名（manifest.author；发布弹窗预填，市场卡片与详情页展示） */
+  author: string | null
   /** 图标文件绝对路径（存在时才非空） */
   icon: string | null
   /** 扩展目录绝对路径 */
@@ -765,11 +807,51 @@ export interface Tag {
   id: number
   name: string
   created_at: string
+  /** 内置标签（「剪藏」）不可改名/删除 */
+  builtin: boolean
+}
+
+/** 笔记文件夹（单归属、可嵌套；builtin = 内置「剪藏」，ADR 0015） */
+export interface NoteFolder {
+  id: number
+  name: string
+  parent_id: number | null
+  sort_order: number
+  builtin: boolean
+  created_at: string
+}
+
+/** 双链出链项（to_note_id = null 表示未链接提及） */
+export interface NoteLinkOut {
+  to_title: string
+  to_note_id: number | null
+}
+
+/** 双链入链项 */
+export interface NoteLinkIn {
+  from_note_id: number
+  from_title: string
+}
+
+export interface NoteLinks {
+  outgoing: NoteLinkOut[]
+  incoming: NoteLinkIn[]
+}
+
+/** 孤儿图片清理报告（dry_run 先出报告，确认后真删） */
+export interface NoteImageGcReport {
+  dry_run: boolean
+  total_files: number
+  referenced: number
+  orphan_files: string[]
+  removed: number
+  failed: number
 }
 
 export interface InitialData {
   resources: Resource[]
   notes: Note[]
+  note_folders: NoteFolder[]
   todos: Todo[]
   stickies: Sticky[]
   detached: DetachedSticky[]
@@ -819,6 +901,24 @@ export interface InstalledAppInfo {
   name: string
   target: string
   icon: string | null
+}
+
+/** 桌面扫描结果项；kind 为展示分类，`folder` 导入速达时归入 `file` 大类 */
+export interface DesktopEntry {
+  name: string
+  target: string
+  icon: string | null
+  kind: 'app' | 'web' | 'file' | 'folder'
+  /** 桌面快捷方式原始路径（仅 .lnk/.url 有），供「导入后清理桌面快捷方式」 */
+  source: string | null
+}
+
+/** 浏览器书签项（Chromium 系 Bookmarks JSON） */
+export interface BrowserBookmark {
+  name: string
+  target: string
+  folder: string
+  browser: string
 }
 
 export interface SystemInfo {
@@ -888,6 +988,10 @@ export const tauriApi = {
     category?: string | null
     icon?: string | null
     args?: string | null
+    zoneId?: number | null
+    description?: string | null
+    remark?: string | null
+    remarkLabel?: string | null
   }) => invoke<Resource>('create_resource', {
     kind: payload.kind,
     name: payload.name,
@@ -895,6 +999,10 @@ export const tauriApi = {
     category: payload.category ?? null,
     icon: payload.icon ?? null,
     args: payload.args ?? null,
+    zoneId: payload.zoneId ?? null,
+    description: payload.description ?? null,
+    remark: payload.remark ?? null,
+    remarkLabel: payload.remarkLabel ?? null,
   }),
   updateResource: (payload: {
     id: number
@@ -904,6 +1012,10 @@ export const tauriApi = {
     category?: string | null
     icon?: string | null
     args?: string | null
+    zoneId?: number | null
+    description?: string | null
+    remark?: string | null
+    remarkLabel?: string | null
   }) => invoke<Resource>('update_resource', {
     id: payload.id,
     kind: payload.kind,
@@ -912,8 +1024,14 @@ export const tauriApi = {
     category: payload.category ?? null,
     icon: payload.icon ?? null,
     args: payload.args ?? null,
+    zoneId: payload.zoneId ?? null,
+    description: payload.description ?? null,
+    remark: payload.remark ?? null,
+    remarkLabel: payload.remarkLabel ?? null,
   }),
   deleteResource: (id: number) => invoke<void>('delete_resource', { id }),
+  getResourceRemark: (resourceId: number) =>
+    invoke<string | null>('get_resource_remark', { resourceId }),
   reorderResources: (ids: number[]) => invoke<void>('reorder_resources', { ids }),
   launchResource: (id: number) => invoke<void>('launch_resource', { id }),
   launchResourceAsAdmin: (id: number) => invoke<void>('launch_resource_as_admin', { id }),
@@ -930,7 +1048,22 @@ export const tauriApi = {
   reorderSubcategories: (kind: 'app' | 'web' | 'file', ids: number[]) =>
     invoke<void>('reorder_subcategories', { kind, ids }),
   setDefaultSubcategory: (id: number) => invoke<void>('set_default_subcategory', { id }),
-  setSudaWebOpenMode: (mode: 'panel' | 'window') =>
+  // ---- 速达分区（「全部」tab 自定义成组陈列，独立于小类）----
+  listZones: () => invoke<ResourceZone[]>('list_zones'),
+  createZone: (name: string) => invoke<ResourceZone>('create_zone', { name }),
+  renameZone: (id: number, name: string) => invoke<void>('rename_zone', { id, name }),
+  deleteZone: (id: number) => invoke<void>('delete_zone', { id }),
+  reorderZones: (ids: number[]) => invoke<void>('reorder_zones', { ids }),
+  /** 调整分区框尺寸（卡片格数 1..=12；拖拽缩放已按格吸附，这里落最终值） */
+  resizeZone: (id: number, cols: number, rows: number) =>
+    invoke<void>('resize_zone', { id, cols, rows }),
+  /** 批量改分区归属（右键移动/删分区撤销），不动 sort_order；zoneId=null 移回未分区 */
+  setResourcesZone: (ids: number[], zoneId: number | null) =>
+    invoke<void>('set_resources_zone', { ids, zoneId }),
+  /** 分区模式拖拽的原子写回：entries 顺序即全表新 sort_order，每项携带目标分区 */
+  reorderResourcesZoned: (entries: { id: number; zoneId: number | null }[]) =>
+    invoke<void>('reorder_resources_zoned', { entries }),
+  setSudaWebOpenMode: (mode: 'panel' | 'window' | 'system') =>
     invoke<string>('set_suda_web_open_mode', { mode }),
   // ---- 速达「应用内打开网页」（ADR 0011）----
   /** 独立浏览器窗口池：按资源 id 打开（后端校验 Web 类型 + http/https 并写最近使用） */
@@ -964,10 +1097,52 @@ export const tauriApi = {
   sudaPanelForward: () => invoke<void>('suda_panel_forward'),
   sudaPanelReload: () => invoke<void>('suda_panel_reload'),
   createNote: (title: string) => invoke<Note>('create_note', { title }),
+  /** 新建笔记（速记视图口径）：一次性落文件夹/来源/初始正文，folderId=null=树根 */
+  createNoteIn: (title: string, content: string, folderId: number | null, sourceUrl: string) =>
+    invoke<Note>('create_note_in', {
+      title,
+      content,
+      folderId: folderId ?? null,
+      sourceUrl,
+    }),
   updateNote: (id: number, title: string, content: string) =>
     invoke<Note>('update_note', { id, title, content }),
   deleteNote: (id: number) => invoke<void>('delete_note', { id }),
   listNotes: () => invoke<Note[]>('list_notes'),
+  getNote: (noteId: number) => invoke<Note | null>('get_note', { noteId }),
+  // ---- 速记改造：回收站 / 文件夹树 / 图片 GC / 双链 ----
+  trashNote: (id: number) => invoke<void>('trash_note', { id }),
+  restoreNote: (id: number) => invoke<void>('restore_note', { id }),
+  purgeNote: (id: number) => invoke<void>('purge_note', { id }),
+  purgeExpiredNotes: () => invoke<{ purged: number }>('purge_expired_notes'),
+  listTrashedNotes: () => invoke<Note[]>('list_trashed_notes'),
+  listNoteFolders: () => invoke<NoteFolder[]>('list_note_folders'),
+  createNoteFolder: (name: string, parentId: number | null) =>
+    invoke<NoteFolder>('create_note_folder', { name, parentId: parentId ?? null }),
+  renameNoteFolder: (id: number, name: string) =>
+    invoke<void>('rename_note_folder', { id, name }),
+  deleteNoteFolder: (id: number) => invoke<void>('delete_note_folder', { id }),
+  reorderNoteFolders: (moves: { id: number; parent_id: number | null; sort_order: number }[]) =>
+    invoke<void>('reorder_note_folders', { moves }),
+  setNoteFolder: (noteId: number, folderId: number | null) =>
+    invoke<void>('set_note_folder', { noteId, folderId: folderId ?? null }),
+  /** 设置/清除笔记自定义树图标（emoji；icon=null 恢复默认） */
+  setNoteIcon: (id: number, icon: string | null) => invoke<void>('set_note_icon', { id, icon }),
+  /** 一键清空回收站（不可恢复，调用方先确认），返回清除条数 */
+  purgeAllTrashedNotes: () => invoke<number>('purge_all_trashed_notes'),
+  gcOrphanNoteImages: (dryRun: boolean) =>
+    invoke<NoteImageGcReport>('gc_orphan_note_images', { dryRun }),
+  getNoteLinks: (noteId: number) => invoke<NoteLinks>('get_note_links', { noteId }),
+  rebuildNoteLinks: () => invoke<void>('rebuild_note_links'),
+  // ---- 速记导出/导入（限自有产物） ----
+  exportNotes: (dir: string) =>
+    invoke<{ exported: number; images: number; failed: string[]; dir: string }>('export_notes', { dir }),
+  importNotes: (dir: string, opts?: { overwrite?: boolean }) =>
+    invoke<{ imported: number; skipped: number; failed: string[]; cancelled: boolean }>('import_notes', {
+      dir,
+      opts: opts ?? { overwrite: false },
+    }),
+  importNotesCancel: () => invoke<void>('import_notes_cancel'),
   searchAll: (keyword: string) => invoke<SearchResult>('search_all', { keyword }),
   listTodos: () => invoke<Todo[]>('list_todos'),
   createTodo: (title: string, parentId?: number | null, createdAt?: string) =>
@@ -1042,6 +1217,16 @@ export const tauriApi = {
     invoke<void>('delete_detached_sticky', { slot }),
   parseDroppedPath: (path: string) => invoke<DroppedAppInfo>('parse_dropped_path', { path }),
   scanInstalledApps: () => invoke<InstalledAppInfo[]>('scan_installed_apps'),
+  /** 扫描用户桌面一层（不递归）：快捷方式/网页/应用/文件/文件夹 */
+  scanDesktop: () => invoke<DesktopEntry[]>('scan_desktop'),
+  /** 删除桌面上的快捷方式（仅 .lnk/.url，且必须是用户桌面直接子项）；返回删除数量 */
+  deleteDesktopShortcuts: (paths: string[]) =>
+    invoke<number>('delete_desktop_shortcuts', { paths }),
+  /** 读取 Chromium 系浏览器书签（Chrome/Edge/Brave/Chromium），不读历史 */
+  scanBrowserBookmarks: () => invoke<BrowserBookmark[]>('scan_browser_bookmarks'),
+  /** 批量抓取网页图标（favicon）：返回 原样 target → 图标绝对路径（抓不到为 null）；同域名只抓一次 */
+  fetchFavicons: (targets: string[]) =>
+    invoke<Record<string, string | null>>('fetch_favicons', { targets }),
   getRunningProcesses: () => invoke<string[]>('get_running_processes'),
   importIconFile: (source: string) =>
     invoke<string | null>('import_icon_file', { source }),
@@ -1056,6 +1241,8 @@ export const tauriApi = {
     invoke<{ name: string; is_dir: boolean }>('inspect_path', { path }),
   listTags: () => invoke<Tag[]>('list_tags'),
   createTag: (name: string) => invoke<Tag>('create_tag', { name }),
+  /** 笔记标签改名（内置标签后端拒绝，FORBIDDEN_BUILTIN/TAG_EXISTS 前缀报错） */
+  renameTag: (id: number, name: string) => invoke<void>('rename_tag', { id, name }),
   deleteTag: (id: number) => invoke<void>('delete_tag', { id }),
   getNoteTags: (noteId: number) => invoke<Tag[]>('get_note_tags', { noteId }),
   setNoteTags: (noteId: number, tagIds: number[]) =>
@@ -1075,6 +1262,10 @@ export const tauriApi = {
   setGlobalShortcut: (value: string) => invoke<string>('set_global_shortcut', { value }),
   setSearchShortcut: (value: string) => invoke<string>('set_search_shortcut', { value }),
   setChatShortcut: (value: string) => invoke<string>('set_chat_shortcut', { value }),
+  setNotesShortcut: (value: string) => invoke<string>('set_notes_shortcut', { value }),
+  /** 启用/禁用某个可自定义全局快捷键（禁用保留键值，只注销热键） */
+  setShortcutEnabled: (kind: 'main' | 'clipboard' | 'search' | 'chat' | 'notes', enabled: boolean) =>
+    invoke<void>('set_shortcut_enabled', { kind, enabled }),
   getRunAtStartup: () =>
     invoke<AutostartStatus>('get_run_at_startup'),
   setRunAtStartup: (enabled: boolean) => invoke<void>('set_run_at_startup', { enabled }),
@@ -1151,6 +1342,12 @@ export const tauriApi = {
     const channel = new Channel<ChatStreamEvent>()
     channel.onmessage = onEvent
     return invoke<void>('send_chat_message', { sessionId, content, onEvent: channel })
+  },
+  /** 笔记 AI 深度整理：无会话、不落库的一次性流式变换；返回值即完整结果（Chunk 经 onEvent 增量推送） */
+  aiTransformNote: (content: string, onEvent: (e: ChatStreamEvent) => void) => {
+    const channel = new Channel<ChatStreamEvent>()
+    channel.onmessage = onEvent
+    return invoke<string>('ai_transform_note', { content, onEvent: channel })
   },
   getChatModels: () => invoke<ChatModelConfig[]>('get_chat_models'),
   /** 平台可用模型（「使用平台免费额度」；需登录账号） */
@@ -1284,7 +1481,8 @@ export const tauriApi = {
   /** 撤销某台设备（换机/设备丢失时用） */
   accountRevokeDevice: (id: number) => invoke<unknown>('account_revoke_device', { id }),
   // ---- 扩展发布（打包上传 / 我的提交 / 撤回） ----
-  /** newVersion 非空时，Rust 端会先把它写回扩展 manifest.json（须大于当前版本）再打包上传 */
+  /** newVersion 非空时，Rust 端会先把它写回扩展 manifest.json（须大于当前版本）再打包上传；
+   *  author 非空且与 manifest 当前署名不同时同样先回写 `author` 字段（市场卡片与详情页展示用它） */
   devSubmit: (
     id: string,
     changelog?: string,
@@ -1292,6 +1490,7 @@ export const tauriApi = {
     homepage?: string,
     screenshots?: string[],
     newVersion?: string,
+    author?: string,
   ) =>
     invoke<SubmitResult>('dev_submit', {
       id,
@@ -1300,9 +1499,15 @@ export const tauriApi = {
       homepage: homepage ?? null,
       screenshots: screenshots && screenshots.length ? screenshots : null,
       newVersion: newVersion ?? null,
+      author: author ?? null,
     }),
   /** 读本地图片为 data URL（发布弹窗的截图缩略图预览用；作者选的图不在资产白名单目录里） */
   readImageDataUrl: (path: string) => invoke<string>('read_image_data_url', { path }),
+  /**
+   * 「引用上一版截图」：下载市场清单里该扩展已上架版本的截图 URL 到本地临时文件。
+   * 返回成功下载的本地路径列表（失效/非图片的 URL 会被跳过；全部失败时 reject）。
+   */
+  fetchRemoteScreenshots: (urls: string[]) => invoke<string[]>('fetch_remote_screenshots', { urls }),
   devListSubmissions: (page?: number, pageSize?: number) =>
     invoke<DevSubmissionList>('dev_list_submissions', {
       page: page ?? null,
